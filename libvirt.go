@@ -7,7 +7,7 @@ import (
 )
 
 /*
-#cgo LDFLAGS: -lvirt 
+#cgo LDFLAGS: -lvirt
 #include <libvirt/libvirt.h>
 #include <libvirt/virterror.h>
 #include <stdlib.h>
@@ -67,6 +67,8 @@ func init() {
 
 type VirConnection struct {
 	ptr C.virConnectPtr
+	// Context registry to keep contexts in memory and out of GC
+	event_cbs map[int]*domainCallbackContext
 }
 
 func NewVirConnection(uri string) (VirConnection, error) {
@@ -79,7 +81,7 @@ func NewVirConnection(uri string) (VirConnection, error) {
 	if ptr == nil {
 		return VirConnection{}, GetLastError()
 	}
-	obj := VirConnection{ptr: ptr}
+	obj := VirConnection{ptr: ptr, event_cbs: make(map[int]*domainCallbackContext)}
 	return obj, nil
 }
 
@@ -93,7 +95,7 @@ func NewVirConnectionReadOnly(uri string) (VirConnection, error) {
 	if ptr == nil {
 		return VirConnection{}, GetLastError()
 	}
-	obj := VirConnection{ptr: ptr}
+	obj := VirConnection{ptr: ptr, event_cbs: make(map[int]*domainCallbackContext)}
 	return obj, nil
 }
 
@@ -115,6 +117,9 @@ func (c *VirConnection) CloseConnection() (int, error) {
 	if result == -1 {
 		return result, GetLastError()
 	}
+	// Cleaup callbacks
+	c.event_cbs = make(map[int]*domainCallbackContext)
+
 	return result, nil
 }
 
@@ -857,16 +862,22 @@ func (c *VirConnection) DomainEventRegister(dom VirDomain,
 		callbackPtr = unsafe.Pointer(C.domainEventDeviceRemovedCallback_cgo)
 	default:
 	}
-	ret := C.virConnectDomainEventRegisterAny(c.ptr, dom.ptr, C.VIR_DOMAIN_EVENT_ID_LIFECYCLE,
+	ret := int(C.virConnectDomainEventRegisterAny(c.ptr, dom.ptr, C.VIR_DOMAIN_EVENT_ID_LIFECYCLE,
 		C.virConnectDomainEventGenericCallback(callbackPtr),
 		unsafe.Pointer(&context),
-		nil)
-	return int(ret)
+		nil))
+	// Keep context in registry
+	if ret != -1 {
+		c.event_cbs[ret] = &context
+	}
+	return ret
 }
 
 func (c *VirConnection) DomainEventDeregister(callbackId int) int {
 	// Deregister the callback
-	return int(C.virConnectDomainEventDeregisterAny(c.ptr, C.int(callbackId)))
+	ret := int(C.virConnectDomainEventDeregisterAny(c.ptr, C.int(callbackId)))
+	delete(c.event_cbs, callbackId)
+	return ret
 }
 
 func EventRegisterDefaultImpl() int {
